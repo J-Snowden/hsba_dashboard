@@ -83,11 +83,8 @@ all_data_averages <- processed$all_data_averages
 
 # Create cached combined data for performance
 combined_data_cache <- NULL
-w_vars_cache <- c()
 if(length(data_list) > 0) {
   combined_data_cache <- bind_rows(data_list, .id = "source_file")
-  # Cache list of w_ variables for faster filtering
-  w_vars_cache <- names(combined_data_cache)[startsWith(names(combined_data_cache), "w_")]
 }
 
 # --- End of Data Loading Section ---
@@ -196,7 +193,6 @@ ui <- fluidPage(
   title = "HSBA Data Dashboard",
   
   tags$head(
-    tags$title("HSBA Data Dashboard"),
     tags$style(HTML("
       body {
         font-family: Arial, sans-serif;
@@ -461,11 +457,11 @@ ui <- fluidPage(
       div(class = "results-container",
           fluidRow(
             column(6, h3("Results", style = "margin-top: 0; margin-bottom: 15px;")),
-            column(6, div(style = "text-align: right; margin-top: 0; display: flex; justify-content: flex-end; align-items: center;", 
-                         conditionalPanel(
-                           condition = "input.task_select != '' && input.variable_select != '' && input.demographic_select != '' && input.results_tabs == 'Chart View'",
-                           uiOutput("chart_controls_ui")
-                         )))
+            column(6, div(style = "text-align: right; margin-top: 0;", 
+                          conditionalPanel(
+                            condition = "input.task_select != '' && input.variable_select != '' && input.demographic_select != '' && input.results_tabs == 'Chart View'",
+                            uiOutput("chart_controls_ui")
+                          )))
           ),
           
           conditionalPanel(
@@ -586,12 +582,12 @@ server <- function(input, output, session) {
     
     # Process based on variable type with early returns for performance
     variable_type <- if(is_average_variable(input$variable_select)) "average" else 
-                    if(is_open_ended_variable(input$variable_select)) "open_ended" else "categorical"
+      if(is_open_ended_variable(input$variable_select)) "open_ended" else "categorical"
     
     switch(variable_type,
-      "average" = process_average_data(filtered_data, input$variable_select, input$demographic_select, input$task_select),
-      "open_ended" = process_open_ended_data(filtered_data, input$variable_select, input$demographic_select),
-      "categorical" = process_categorical_data(filtered_data, input$variable_select, input$demographic_select)
+           "average" = process_average_data(filtered_data, input$variable_select, input$demographic_select, input$task_select),
+           "open_ended" = process_open_ended_data(filtered_data, input$variable_select, input$demographic_select),
+           "categorical" = process_categorical_data(filtered_data, input$variable_select, input$demographic_select)
     )
   })
   process_categorical_data <- function(filtered_data, variable, demographic) {
@@ -636,13 +632,10 @@ server <- function(input, output, session) {
     overall_task_sd <- if(length(all_task_values) > 0) round(sd(all_task_values), 2) else NA
     overall_task_count <- length(all_task_values)
     
-    # Overall all-data average and SD - optimized calculation
+    # Overall all-data average (sum across all demographic groups)
     overall_all_data_count <- 0
     overall_all_data_sum <- 0
-    overall_all_data_avg <- NA
-    overall_all_data_sd <- NA
-    
-    # Use pre-calculated averages to compute overall statistics (faster)
+    overall_all_data_values <- c()
     for(demo_val in all_demo_values) {
       if(length(all_data_averages) > 0 && 
          variable %in% names(all_data_averages) &&
@@ -652,37 +645,13 @@ server <- function(input, output, session) {
         if(!is.null(all_data_info) && !is.na(all_data_info$average) && !is.na(all_data_info$count)) {
           overall_all_data_count <- overall_all_data_count + all_data_info$count
           overall_all_data_sum <- overall_all_data_sum + (all_data_info$average * all_data_info$count)
+          # Store individual values for SD calculation if available
+          overall_all_data_values <- c(overall_all_data_values, rep(all_data_info$average, all_data_info$count))
         }
       }
     }
-    
     overall_all_data_avg <- if(overall_all_data_count > 0) round(overall_all_data_sum / overall_all_data_count, 2) else NA
-    
-    # For overall SD, only calculate if we have pre-calculated individual SDs
-    # This avoids expensive raw data computation
-    if(overall_all_data_count > 0) {
-      # Use pooled standard deviation formula for better performance
-      sum_sq_diff <- 0
-      total_count <- 0
-      
-      for(demo_val in all_demo_values) {
-        if(length(all_data_averages) > 0 && 
-           variable %in% names(all_data_averages) &&
-           demographic %in% names(all_data_averages[[variable]]) &&
-           demo_val %in% names(all_data_averages[[variable]][[demographic]])) {
-          all_data_info <- all_data_averages[[variable]][[demographic]][[demo_val]]
-          if(!is.null(all_data_info) && !is.na(all_data_info$average) && !is.na(all_data_info$sd) && !is.na(all_data_info$count)) {
-            # Pooled variance formula component
-            group_variance <- all_data_info$sd^2
-            group_mean_diff <- (all_data_info$average - overall_all_data_avg)^2
-            sum_sq_diff <- sum_sq_diff + (all_data_info$count - 1) * group_variance + all_data_info$count * group_mean_diff
-            total_count <- total_count + all_data_info$count
-          }
-        }
-      }
-      
-      overall_all_data_sd <- if(total_count > 1) round(sqrt(sum_sq_diff / (total_count - 1)), 2) else NA
-    }
+    overall_all_data_sd <- if(length(overall_all_data_values) > 1) round(sd(overall_all_data_values), 2) else NA
     
     for(demo_val in all_demo_values) {
       demo_label <- demographic_mappings[[demographic]][[demo_val]]
@@ -695,12 +664,7 @@ server <- function(input, output, session) {
       task_sd <- if(length(numeric_values) > 1) round(sd(numeric_values), 2) else NA
       task_count <- length(numeric_values)
       
-      # All data average and SD - use pre-calculated when possible for performance
-      all_data_avg <- NA
-      all_data_sd <- NA
-      all_data_count <- 0
-      
-      # Use pre-calculated averages first (much faster)
+      # All data average
       all_data_info <- NULL
       if(length(all_data_averages) > 0 && 
          variable %in% names(all_data_averages) &&
@@ -709,24 +673,17 @@ server <- function(input, output, session) {
         all_data_info <- all_data_averages[[variable]][[demographic]][[demo_val]]
       }
       
-      if(!is.null(all_data_info)) {
-        all_data_avg <- if(!is.na(all_data_info$average)) round(all_data_info$average, 2) else NA
-        all_data_sd <- if(!is.na(all_data_info$sd)) round(all_data_info$sd, 2) else NA
-        all_data_count <- all_data_info$count
-      } else if(!is.null(combined_data_cache) && variable %in% names(combined_data_cache) && demographic %in% names(combined_data_cache)) {
-        # Fallback to raw calculation only if pre-calculated data is missing
-        demo_raw_data <- combined_data_cache %>%
-          filter(.data[[demographic]] == demo_val,
-                 !is.na(.data[[variable]]), .data[[variable]] != "") %>%
-          mutate(numeric_value = as.numeric(.data[[variable]])) %>%
-          filter(!is.na(numeric_value))
-        
-        if(nrow(demo_raw_data) > 0) {
-          all_data_count <- nrow(demo_raw_data)
-          all_data_avg <- round(mean(demo_raw_data$numeric_value), 2)
-          all_data_sd <- if(all_data_count > 1) round(sd(demo_raw_data$numeric_value), 2) else NA
-        }
+      all_data_avg <- if(!is.null(all_data_info) && !is.na(all_data_info$average)) {
+        round(all_data_info$average, 2)
+      } else {
+        NA
       }
+      all_data_sd <- if(!is.null(all_data_info) && !is.na(all_data_info$sd)) {
+        round(all_data_info$sd, 2)
+      } else {
+        NA
+      }
+      all_data_count <- if(!is.null(all_data_info)) all_data_info$count else 0
       
       # Format averages with SD in parentheses
       task_avg_display <- if(!is.na(task_avg) && !is.na(task_sd)) {
@@ -906,8 +863,8 @@ server <- function(input, output, session) {
     
     if(is_likert_variable(input$variable_select)) {
       # Chart type selector for Likert scale (F_L) variables
-      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px; justify-content: flex-end;",
-          span("Select Chart Type:", style="white-space: nowrap; line-height: 1.5; display: flex; align-items: center;"),
+      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px;",
+          span("Select Chart Type:", style="white-space: nowrap; min-width: 110px;"),
           div(style="min-width: 180px;",
               selectInput("chart_type", NULL, 
                           choices = c("Likert Chart" = "likert", "Current vs Overall" = "comparison"), 
@@ -917,8 +874,8 @@ server <- function(input, output, session) {
       )
     } else if(is_categorical_chartable(input$variable_select)) {
       # Chart type selector for other categorical variables
-      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px; justify-content: flex-end;",
-          span("Select Chart Type:", style="white-space: nowrap; line-height: 1.5; display: flex; align-items: center;"),
+      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px;",
+          span("Select Chart Type:", style="white-space: nowrap; min-width: 110px;"),
           div(style="min-width: 140px;",
               selectInput("chart_type", NULL, 
                           choices = c("Bar Chart" = "bar", "Pie Chart" = "pie"), 
@@ -928,8 +885,8 @@ server <- function(input, output, session) {
       )
     } else if(is_average_variable(input$variable_select)) {
       # Chart type selector for average variables
-      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px; justify-content: flex-end;",
-          span("Select Chart Type:", style="white-space: nowrap; line-height: 1.5; display: flex; align-items: center;"),
+      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px;",
+          span("Select Chart Type:", style="white-space: nowrap; min-width: 110px;"),
           div(style="min-width: 160px;",
               selectInput("chart_type", NULL, 
                           choices = c("Task Average" = "task", "All Data Average" = "all_data", "Both" = "both"), 
@@ -1087,21 +1044,21 @@ server <- function(input, output, session) {
             pos_cumsum = cumsum(pos_percent),
             # Final position for each bar
             plot_value = ifelse(Variable %in% c("Disagree", "Somewhat disagree"), 
-                               neg_cumsum - neg_percent/2, 
-                               pos_cumsum - pos_percent/2)
+                                neg_cumsum - neg_percent/2, 
+                                pos_cumsum - pos_percent/2)
           ) %>%
           ungroup()
         
         # Create colors for responses (red to blue scale)
         likert_colors <- c("Disagree" = "#d73027", "Somewhat disagree" = "#fc8d59",
-                          "Somewhat agree" = "#91bfdb", "Agree" = "#4575b4")
+                           "Somewhat agree" = "#91bfdb", "Agree" = "#4575b4")
         
         # Create the centered chart
         p <- ggplot(likert_data, aes(x = Demo_Label, fill = Variable)) +
           geom_col(aes(y = neg_percent), alpha = 0.9) +
           geom_col(aes(y = pos_percent), alpha = 0.9) +
           geom_text(aes(y = plot_value, label = ifelse(abs(Percentage) > 5, paste0(Percentage, "%"), "")), 
-                   size = 3.5, color = "white", fontface = "bold") +
+                    size = 3.5, color = "white", fontface = "bold") +
           scale_fill_manual(values = likert_colors) +
           coord_flip() +
           geom_hline(yintercept = 0, color = "black", size = 0.5) +
@@ -1170,7 +1127,7 @@ server <- function(input, output, session) {
             
             # Create colors for responses
             likert_colors <- c("Disagree" = "#d73027", "Somewhat disagree" = "#fc8d59",
-                              "Somewhat agree" = "#91bfdb", "Agree" = "#4575b4")
+                               "Somewhat agree" = "#91bfdb", "Agree" = "#4575b4")
             
             # Calculate positions for centered chart
             comparison_data <- comparison_data %>%
@@ -1186,8 +1143,8 @@ server <- function(input, output, session) {
                 pos_cumsum = cumsum(pos_percent),
                 # Final position for each bar
                 plot_value = ifelse(Variable %in% c("Disagree", "Somewhat disagree"), 
-                                   neg_cumsum - neg_percent/2, 
-                                   pos_cumsum - pos_percent/2)
+                                    neg_cumsum - neg_percent/2, 
+                                    pos_cumsum - pos_percent/2)
               ) %>%
               ungroup()
             
@@ -1196,7 +1153,7 @@ server <- function(input, output, session) {
               geom_col(aes(y = neg_percent), alpha = 0.9) +
               geom_col(aes(y = pos_percent), alpha = 0.9) +
               geom_text(aes(y = plot_value, label = ifelse(abs(Percentage) > 5, paste0(Percentage, "%"), "")), 
-                       size = 3.5, color = "white", fontface = "bold") +
+                        size = 3.5, color = "white", fontface = "bold") +
               scale_fill_manual(values = likert_colors) +
               coord_flip() +
               geom_hline(yintercept = 0, color = "black", size = 0.5) +
