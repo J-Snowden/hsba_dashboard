@@ -5,36 +5,50 @@ library(shiny)
 library(ggplot2)
 library(DT)
 library(dplyr)
+library(shinyWidgets)
 
 # --- Data Loading and Pre-processing ---
 # This section reads local CSVs and prepares the data objects for the app.
 
-# Function to read all CSVs from the 'data' subfolder
+# Function to read the consolidated CSV file
 load_data_and_process <- function(path = "data") {
-  csv_files <- list.files(path, pattern = "\\.csv$", full.names = TRUE)
-  if (length(csv_files) == 0) {
-    # Return empty lists if no data is found
+  consolidated_file <- file.path(path, "all_tasks_long_by_task.csv")
+  
+  if (!file.exists(consolidated_file)) {
+    # Return empty lists if consolidated file is not found
     return(list(data_list = list(), task_mapping = list(), column_order = list(), all_data_averages = list()))
   }
   
-  # 1. Create data_list (a list of data frames)
-  data_list <- lapply(csv_files, read.csv, stringsAsFactors = FALSE, colClasses = "character")
-  file_keys <- gsub("\\.csv$", "", basename(csv_files))
-  names(data_list) <- file_keys
+  # 1. Read the consolidated data file
+  all_data <- read.csv(consolidated_file, stringsAsFactors = FALSE, colClasses = "character")
   
-  # 2. Create task_mapping (for user-friendly names)
-  create_task_name <- function(filename) {
-    clean_name <- gsub("\\.csv$|_clean$", "", filename)
+  if(nrow(all_data) == 0 || !"Task_Name" %in% names(all_data)) {
+    return(list(data_list = list(), task_mapping = list(), column_order = list(), all_data_averages = list()))
+  }
+  
+  # 2. Create data_list by filtering data by Task_Name
+  unique_tasks <- unique(all_data$Task_Name)
+  unique_tasks <- unique_tasks[!is.na(unique_tasks) & unique_tasks != ""]
+  
+  data_list <- list()
+  for(task in unique_tasks) {
+    data_list[[task]] <- all_data[all_data$Task_Name == task, ]
+  }
+  
+  # 3. Create task_mapping (for user-friendly names)
+  create_task_name <- function(task_name) {
+    clean_name <- gsub("_clean$", "", task_name)
     clean_name <- gsub("_", " ", clean_name)
     tools::toTitleCase(clean_name)
   }
   task_mapping <- setNames(sapply(names(data_list), create_task_name), names(data_list))
   
-  # 3. Create column_order (maintains original column order)
+  # 4. Create column_order (maintains original column order)
   column_order <- lapply(data_list, names)
   
-  # 4. Create all_data_averages (pre-calculates averages for all 'w_' variables)
-  combined_df <- bind_rows(data_list, .id = "source_file")
+  # 5. Create all_data_averages (pre-calculates averages for all 'w_' variables)
+  # Use the consolidated data directly since it already contains all tasks
+  combined_df <- all_data
   w_vars <- names(combined_df)[startsWith(names(combined_df), "w_")]
   demographicVars <- c("Race", "Gender", "Grade", "English")
   
@@ -70,7 +84,8 @@ load_data_and_process <- function(path = "data") {
     data_list = data_list,
     task_mapping = task_mapping,
     column_order = column_order,
-    all_data_averages = all_data_averages
+    all_data_averages = all_data_averages,
+    consolidated_data = all_data
   ))
 }
 
@@ -83,8 +98,12 @@ all_data_averages <- processed$all_data_averages
 
 # Create cached combined data for performance
 combined_data_cache <- NULL
-if(length(data_list) > 0) {
-  combined_data_cache <- bind_rows(data_list, .id = "source_file")
+w_vars_cache <- c()
+if(length(data_list) > 0 && !is.null(processed$consolidated_data)) {
+  # Use the consolidated data directly since it already contains all tasks
+  combined_data_cache <- processed$consolidated_data
+  # Cache list of w_ variables for faster filtering
+  w_vars_cache <- names(combined_data_cache)[startsWith(names(combined_data_cache), "w_")]
 }
 
 # --- End of Data Loading Section ---
@@ -106,10 +125,10 @@ excluded_columns <- c(
   "NGSS_Sc_Adpot", "NGSS_Di_Adpot", "NGSS_Transition", "NGSS_Time", 
   "NGSS_Time_Other", "NGSS_Exp", "Cur_Purchased", "Cur_Free", 
   "Cur_School", "Cur_Designed", "Cur_Adapted", "Cur_Other", 
-  "Res_OSE", "Res_BSCS", "Res_Other"
+  "Res_OSE", "Res_BSCS", "Res_Other", "OSE_BSCS", "Task_Name", "Task_Prefix", "Test_Position"
 )
 
-demographicVars <- c("Race", "Gender", "Grade", "English")
+demographicVars <- c("Race", "Gender", "Grade", "English", "Test_Position", "OSE_BSCS")
 
 # F_L and SC item mappings
 fl_item_mappings <- c("1" = "Disagree", "2" = "Somewhat disagree", "3" = "Somewhat agree", "4" = "Agree")
@@ -193,6 +212,11 @@ ui <- fluidPage(
   title = "HSBA Data Dashboard",
   
   tags$head(
+    tags$title("HSBA Data Dashboard"),
+    tags$link(
+      rel = "stylesheet",
+      href = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+    ),
     tags$style(HTML("
       body {
         font-family: Arial, sans-serif;
@@ -379,6 +403,15 @@ ui <- fluidPage(
       .selectize-input > div.item {
         text-align: left !important;
       }
+      .checkbox-group-header {
+        font-weight: bold !important;
+        color: #495057 !important;
+        margin-top: 15px !important;
+        margin-bottom: 8px !important;
+      }
+      .checkbox-group-header:first-child {
+        margin-top: 0 !important;
+      }
     ")),
     tags$script(HTML("
       $(document).ready(function() {
@@ -446,18 +479,26 @@ ui <- fluidPage(
                                                "Grade" = "Grade",
                                                "Gender" = "Gender", 
                                                "Race" = "Race",
-                                               "English" = "English"),
+                                               "English" = "English",
+                                               "Test Position" = "Test_Position",
+                                               "OSE BSCS" = "OSE_BSCS"),
                                    selected = "")
                    )
             )
           )
       ),
       
+      
       # Results
       div(class = "results-container",
           fluidRow(
-            column(6, h3("Results", style = "margin-top: 0; margin-bottom: 15px;")),
-            column(6, div(style = "text-align: right; margin-top: 0;", 
+            column(4, h3("Results", style = "margin-top: 0; margin-bottom: 15px;")),
+            column(4, div(style = "margin-top: 0; display: flex; justify-content: center; align-items: center;", 
+                          conditionalPanel(
+                            condition = "input.task_select != '' && input.variable_select != '' && input.demographic_select != ''",
+                            uiOutput("demographic_filter_dropdown_ui")
+                          ))),
+            column(4, div(style = "text-align: right; margin-top: 0; display: flex; justify-content: flex-end; align-items: center;", 
                           conditionalPanel(
                             condition = "input.task_select != '' && input.variable_select != '' && input.demographic_select != '' && input.results_tabs == 'Chart View'",
                             uiOutput("chart_controls_ui")
@@ -514,10 +555,18 @@ server <- function(input, output, session) {
   # Initialize task choices
   observe({
     if(length(data_list) > 0) {
-      task_choices <- c("Choose a task..." = "")
+      # Create task choices with display names
+      task_options <- list()
       for(key in names(data_list)) {
         display_name <- if(key %in% names(task_mapping)) task_mapping[[key]] else key
-        task_choices <- c(task_choices, setNames(key, display_name))
+        task_options[[display_name]] <- key
+      }
+      
+      # Sort alphabetically by display names
+      sorted_names <- sort(names(task_options))
+      task_choices <- c("Choose a task..." = "")
+      for(display_name in sorted_names) {
+        task_choices <- c(task_choices, setNames(task_options[[display_name]], display_name))
       }
       
       updateSelectInput(session, "task_select", choices = task_choices)
@@ -533,7 +582,29 @@ server <- function(input, output, session) {
         available_variables <- names(data_list[[input$task_select]])
       }
       
+      # Get task prefix for filtering task-specific variables
+      selected_data <- data_list[[input$task_select]]
+      task_prefix <- ""
+      if("Task_Prefix" %in% names(selected_data) && nrow(selected_data) > 0) {
+        task_prefix <- selected_data$Task_Prefix[1]
+      }
+      
+      # Filter variables: exclude unwanted columns, then keep only:
+      # 1. Task-specific variables (those starting with task prefix)
+      # 2. F_L and F_OE variables (common across tasks)
+      # 3. w_ variables (weighted variables)
       filtered_variables <- available_variables[!available_variables %in% c(demographicVars, excluded_columns)]
+      
+      # Further filter to task-specific variables
+      if(task_prefix != "" && task_prefix != "NA") {
+        task_specific_variables <- filtered_variables[
+          startsWith(filtered_variables, paste0(task_prefix, "_")) |  # Task-specific variables
+            startsWith(filtered_variables, "F_L") |                     # F_L variables
+            startsWith(filtered_variables, "F_OE") |                    # F_OE variables  
+            startsWith(filtered_variables, "w_")                        # Weighted variables
+        ]
+        filtered_variables <- task_specific_variables
+      }
       
       # Create user-friendly names for the dropdown
       variable_choices <- setNames(filtered_variables, sapply(filtered_variables, create_w_variable_name))
@@ -548,9 +619,117 @@ server <- function(input, output, session) {
     }
   })
   
-  # Reactive data processing with caching
+  # Generate demographic filter dropdown UI
+  output$demographic_filter_dropdown_ui <- renderUI({
+    req(input$demographic_select, input$task_select)
+    
+    if(input$task_select %in% names(data_list)) {
+      # Get all available demographic data across all variables
+      dataset <- data_list[[input$task_select]]
+      
+      # Create choices list with optgroups for pickerInput (grouped structure)
+      choices_list <- list()
+      
+      # Define the order for demographics
+      ordered_demographics <- c("Grade", "Gender", "Race", "English")
+      
+      for(demo_var in ordered_demographics) {
+        if(demo_var %in% names(dataset)) {
+          available_values <- unique(dataset[[demo_var]])
+          available_values <- available_values[!is.na(available_values) & available_values != ""]
+          
+          if(length(available_values) > 0 && demo_var %in% names(demographic_mappings)) {
+            # Sort available values for consistent ordering
+            if(demo_var == "Grade") {
+              # Order grades numerically
+              available_values <- available_values[order(as.numeric(available_values))]
+            } else {
+              available_values <- sort(available_values)
+            }
+            
+            # Create options for this demographic group
+            demo_options <- c()
+            for(val in available_values) {
+              if(val %in% names(demographic_mappings[[demo_var]])) {
+                label <- demographic_mappings[[demo_var]][[val]]
+                option_key <- paste0(demo_var, "_", val)
+                demo_options <- c(demo_options, setNames(option_key, label))
+              }
+            }
+            
+            # Add this demographic group to choices_list as an optgroup
+            if(length(demo_options) > 0) {
+              choices_list[[demo_var]] <- demo_options
+            }
+          }
+        }
+      }
+      
+      # Get default selected values (all sub-options of currently selected demographic)
+      default_selected <- c()
+      if(input$demographic_select %in% names(dataset)) {
+        available_values <- unique(dataset[[input$demographic_select]])
+        available_values <- available_values[!is.na(available_values) & available_values != ""]
+        
+        for(val in available_values) {
+          if(val %in% names(demographic_mappings[[input$demographic_select]])) {
+            option_key <- paste0(input$demographic_select, "_", val)
+            default_selected <- c(default_selected, option_key)
+          }
+        }
+      }
+      
+      if(length(choices_list) > 0) {
+        div(style = "min-width: 250px;",
+            pickerInput("demographic_filter_multi", 
+                        "Filter Demographic Groups:",
+                        choices = choices_list,
+                        selected = default_selected,
+                        multiple = TRUE,
+                        options = list(
+                          `actions-box` = TRUE,
+                          `selected-text-format` = "count > 3",
+                          `count-selected-text` = "{0} demographic groups selected"
+                        ))
+        )
+      }
+    }
+  })
+  
+  # Update picker selections when demographic selection changes
+  observe({
+    req(input$demographic_select, input$task_select)
+    
+    if(input$task_select %in% names(data_list)) {
+      dataset <- data_list[[input$task_select]]
+      
+      # Get all sub-options for the currently selected demographic
+      if(input$demographic_select %in% names(dataset)) {
+        available_values <- unique(dataset[[input$demographic_select]])
+        available_values <- available_values[!is.na(available_values) & available_values != ""]
+        
+        new_selected <- c()
+        for(val in available_values) {
+          if(val %in% names(demographic_mappings[[input$demographic_select]])) {
+            option_key <- paste0(input$demographic_select, "_", val)
+            new_selected <- c(new_selected, option_key)
+          }
+        }
+        
+        # Update the picker selection
+        updatePickerInput(session, "demographic_filter_multi",
+                          selected = new_selected)
+      }
+    }
+  })
+  
+  # Reactive data processing with caching and debouncing
   processed_data <- reactive({
     req(input$task_select, input$variable_select, input$demographic_select)
+    
+    # Add reactive dependency on the filter - force reactivity
+    filter_input <- input$demographic_filter_multi
+    if(is.null(filter_input)) filter_input <- character(0)
     
     if(input$task_select == "" || input$variable_select == "" || input$demographic_select == "" ||
        length(data_list) == 0 || !input$task_select %in% names(data_list)) {
@@ -576,6 +755,47 @@ server <- function(input, output, session) {
         !is.na(dataset[[input$demographic_select]]) & dataset[[input$demographic_select]] != "", 
     ]
     
+    # Apply demographic filter if available
+    if(!is.null(input$demographic_filter_multi) && length(input$demographic_filter_multi) > 0) {
+      # Parse the selected options to extract demographic values
+      selected_filters <- input$demographic_filter_multi
+      
+      if(length(selected_filters) > 0) {
+        # Parse demographic_variable_value format
+        allowed_values <- list()
+        
+        for(filter_item in selected_filters) {
+          parts <- strsplit(filter_item, "_", fixed = TRUE)[[1]]
+          if(length(parts) >= 2) {
+            demo_var <- parts[1]
+            demo_val <- paste(parts[-1], collapse = "_")  # In case value contains underscores
+            
+            if(!demo_var %in% names(allowed_values)) {
+              allowed_values[[demo_var]] <- c()
+            }
+            allowed_values[[demo_var]] <- c(allowed_values[[demo_var]], demo_val)
+          }
+        }
+        
+        # Store original count for debugging
+        original_count <- nrow(filtered_data)
+        
+        # Apply filters for each demographic variable
+        for(demo_var in names(allowed_values)) {
+          if(demo_var %in% names(filtered_data)) {
+            # Apply filter for this demographic variable
+            filtered_data <- filtered_data[filtered_data[[demo_var]] %in% allowed_values[[demo_var]], ]
+          }
+        }
+        
+        # Debug output (only in development)
+        if(nrow(filtered_data) != original_count) {
+          cat("Filter applied:", length(allowed_values), "demographics,", 
+              original_count, "->", nrow(filtered_data), "rows\n")
+        }
+      }
+    }
+    
     if(nrow(filtered_data) == 0) {
       return(NULL)
     }
@@ -585,19 +805,26 @@ server <- function(input, output, session) {
       if(is_open_ended_variable(input$variable_select)) "open_ended" else "categorical"
     
     switch(variable_type,
-           "average" = process_average_data(filtered_data, input$variable_select, input$demographic_select, input$task_select),
+           "average" = process_average_data(filtered_data, input$variable_select, input$demographic_select, input$task_select, input$demographic_filter_multi),
            "open_ended" = process_open_ended_data(filtered_data, input$variable_select, input$demographic_select),
            "categorical" = process_categorical_data(filtered_data, input$variable_select, input$demographic_select)
     )
   })
   process_categorical_data <- function(filtered_data, variable, demographic) {
-    all_demo_values <- names(demographic_mappings[[demographic]])
+    # Only process demographic values that are actually in the filtered data
+    available_demo_values <- unique(filtered_data[[demographic]])
+    available_demo_values <- available_demo_values[!is.na(available_demo_values)]
+    
     all_var_values <- unique(filtered_data[[variable]])
     
     results <- data.frame()
     
-    for(demo_val in all_demo_values) {
-      demo_label <- demographic_mappings[[demographic]][[demo_val]]
+    for(demo_val in available_demo_values) {
+      demo_label <- if(demo_val %in% names(demographic_mappings[[demographic]])) {
+        demographic_mappings[[demographic]][[demo_val]]
+      } else {
+        demo_val
+      }
       demo_data <- filtered_data[filtered_data[[demographic]] == demo_val, ]
       
       for(var_val in all_var_values) {
@@ -620,41 +847,87 @@ server <- function(input, output, session) {
   }
   
   # Process average data
-  process_average_data <- function(filtered_data, variable, demographic, task_key) {
-    all_demo_values <- names(demographic_mappings[[demographic]])
+  process_average_data <- function(filtered_data, variable, demographic, task_key, demographic_filters = NULL) {
+    # Only process demographic values that are actually in the filtered data for TASK calculations
+    available_demo_values <- unique(filtered_data[[demographic]])
+    available_demo_values <- available_demo_values[!is.na(available_demo_values)]
+    
+    # Get demographic values for OVERALL calculations 
+    # Use filtered values when demographic filtering is applied, otherwise use all values
+    all_demo_values <- available_demo_values  # Use the same filtered values as task calculations
+    if(length(all_data_averages) > 0 && 
+       variable %in% names(all_data_averages) &&
+       demographic %in% names(all_data_averages[[variable]])) {
+      # Only use the demographic values that are present in filtered data
+      all_available_values <- names(all_data_averages[[variable]][[demographic]])
+      all_demo_values <- all_available_values[all_available_values %in% available_demo_values]
+    }
+    
     results <- data.frame()
     raw_values <- list()
     
-    # Calculate overall totals for the Overall Average row
+    # Calculate overall totals for the Overall Average row (TASK data - filtered)
     all_task_values <- as.numeric(filtered_data[[variable]])
     all_task_values <- all_task_values[!is.na(all_task_values)]
     overall_task_avg <- if(length(all_task_values) > 0) round(mean(all_task_values), 2) else NA
     overall_task_sd <- if(length(all_task_values) > 0) round(sd(all_task_values), 2) else NA
     overall_task_count <- length(all_task_values)
     
-    # Overall all-data average (sum across all demographic groups)
+    # Overall all-data average and SD - calculate from consolidated data with same filtering
     overall_all_data_count <- 0
-    overall_all_data_sum <- 0
-    overall_all_data_values <- c()
-    for(demo_val in all_demo_values) {
-      if(length(all_data_averages) > 0 && 
-         variable %in% names(all_data_averages) &&
-         demographic %in% names(all_data_averages[[variable]]) &&
-         demo_val %in% names(all_data_averages[[variable]][[demographic]])) {
-        all_data_info <- all_data_averages[[variable]][[demographic]][[demo_val]]
-        if(!is.null(all_data_info) && !is.na(all_data_info$average) && !is.na(all_data_info$count)) {
-          overall_all_data_count <- overall_all_data_count + all_data_info$count
-          overall_all_data_sum <- overall_all_data_sum + (all_data_info$average * all_data_info$count)
-          # Store individual values for SD calculation if available
-          overall_all_data_values <- c(overall_all_data_values, rep(all_data_info$average, all_data_info$count))
+    overall_all_data_avg <- NA
+    overall_all_data_sd <- NA
+    
+    # Calculate overall statistics from consolidated data with filtering
+    if(!is.null(combined_data_cache) && variable %in% names(combined_data_cache) && demographic %in% names(combined_data_cache)) {
+      # Start with all consolidated data
+      overall_raw_data <- combined_data_cache %>%
+        filter(!is.na(.data[[variable]]), .data[[variable]] != "",
+               !is.na(.data[[demographic]]), .data[[demographic]] != "") %>%
+        mutate(numeric_value = as.numeric(.data[[variable]])) %>%
+        filter(!is.na(numeric_value))
+      
+      # Apply the same demographic filtering
+      if(!is.null(demographic_filters) && length(demographic_filters) > 0) {
+        selected_filters <- demographic_filters
+        allowed_values <- list()
+        
+        for(filter_item in selected_filters) {
+          parts <- strsplit(filter_item, "_", fixed = TRUE)[[1]]
+          if(length(parts) >= 2) {
+            demo_var <- parts[1]
+            demo_val_filter <- paste(parts[-1], collapse = "_")
+            
+            if(!demo_var %in% names(allowed_values)) {
+              allowed_values[[demo_var]] <- c()
+            }
+            allowed_values[[demo_var]] <- c(allowed_values[[demo_var]], demo_val_filter)
+          }
+        }
+        
+        # Apply filters to consolidated data
+        for(demo_var in names(allowed_values)) {
+          if(demo_var %in% names(overall_raw_data)) {
+            overall_raw_data <- overall_raw_data %>%
+              filter(.data[[demo_var]] %in% allowed_values[[demo_var]])
+          }
         }
       }
+      
+      if(nrow(overall_raw_data) > 0) {
+        overall_all_data_count <- nrow(overall_raw_data)
+        overall_all_data_avg <- round(mean(overall_raw_data$numeric_value), 2)
+        overall_all_data_sd <- if(overall_all_data_count > 1) round(sd(overall_raw_data$numeric_value), 2) else NA
+      }
     }
-    overall_all_data_avg <- if(overall_all_data_count > 0) round(overall_all_data_sum / overall_all_data_count, 2) else NA
-    overall_all_data_sd <- if(length(overall_all_data_values) > 1) round(sd(overall_all_data_values), 2) else NA
     
-    for(demo_val in all_demo_values) {
-      demo_label <- demographic_mappings[[demographic]][[demo_val]]
+    
+    for(demo_val in available_demo_values) {
+      demo_label <- if(demo_val %in% names(demographic_mappings[[demographic]])) {
+        demographic_mappings[[demographic]][[demo_val]]
+      } else {
+        demo_val
+      }
       demo_data <- filtered_data[filtered_data[[demographic]] == demo_val, ]
       
       # Task average and standard deviation
@@ -664,26 +937,55 @@ server <- function(input, output, session) {
       task_sd <- if(length(numeric_values) > 1) round(sd(numeric_values), 2) else NA
       task_count <- length(numeric_values)
       
-      # All data average
-      all_data_info <- NULL
-      if(length(all_data_averages) > 0 && 
-         variable %in% names(all_data_averages) &&
-         demographic %in% names(all_data_averages[[variable]]) &&
-         demo_val %in% names(all_data_averages[[variable]][[demographic]])) {
-        all_data_info <- all_data_averages[[variable]][[demographic]][[demo_val]]
-      }
+      # All data average and SD - use pre-calculated when possible for performance
+      all_data_avg <- NA
+      all_data_sd <- NA
+      all_data_count <- 0
       
-      all_data_avg <- if(!is.null(all_data_info) && !is.na(all_data_info$average)) {
-        round(all_data_info$average, 2)
-      } else {
-        NA
+      # Calculate all data statistics from consolidated data with same filtering as applied to task data
+      if(!is.null(combined_data_cache) && variable %in% names(combined_data_cache) && demographic %in% names(combined_data_cache)) {
+        # Start with all consolidated data for this demographic value
+        demo_raw_data <- combined_data_cache %>%
+          filter(.data[[demographic]] == demo_val,
+                 !is.na(.data[[variable]]), .data[[variable]] != "") %>%
+          mutate(numeric_value = as.numeric(.data[[variable]])) %>%
+          filter(!is.na(numeric_value))
+        
+        # Apply the same demographic filtering that was applied to filtered_data
+        # Get the demographic filters that were applied to create filtered_data
+        if(!is.null(demographic_filters) && length(demographic_filters) > 0) {
+          # Parse the selected demographic filters
+          selected_filters <- demographic_filters
+          allowed_values <- list()
+          
+          for(filter_item in selected_filters) {
+            parts <- strsplit(filter_item, "_", fixed = TRUE)[[1]]
+            if(length(parts) >= 2) {
+              demo_var <- parts[1]
+              demo_val_filter <- paste(parts[-1], collapse = "_")
+              
+              if(!demo_var %in% names(allowed_values)) {
+                allowed_values[[demo_var]] <- c()
+              }
+              allowed_values[[demo_var]] <- c(allowed_values[[demo_var]], demo_val_filter)
+            }
+          }
+          
+          # Apply filters to consolidated data
+          for(demo_var in names(allowed_values)) {
+            if(demo_var %in% names(demo_raw_data)) {
+              demo_raw_data <- demo_raw_data %>%
+                filter(.data[[demo_var]] %in% allowed_values[[demo_var]])
+            }
+          }
+        }
+        
+        if(nrow(demo_raw_data) > 0) {
+          all_data_count <- nrow(demo_raw_data)
+          all_data_avg <- round(mean(demo_raw_data$numeric_value), 2)
+          all_data_sd <- if(all_data_count > 1) round(sd(demo_raw_data$numeric_value), 2) else NA
+        }
       }
-      all_data_sd <- if(!is.null(all_data_info) && !is.na(all_data_info$sd)) {
-        round(all_data_info$sd, 2)
-      } else {
-        NA
-      }
-      all_data_count <- if(!is.null(all_data_info)) all_data_info$count else 0
       
       # Format averages with SD in parentheses
       task_avg_display <- if(!is.na(task_avg) && !is.na(task_sd)) {
@@ -863,30 +1165,22 @@ server <- function(input, output, session) {
     
     if(is_likert_variable(input$variable_select)) {
       # Chart type selector for Likert scale (F_L) variables
-      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px;",
-          span("Select Chart Type:", style="white-space: nowrap; min-width: 110px;"),
+      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px; justify-content: flex-end;",
+          span("Select Chart Type:", style="white-space: nowrap; line-height: 1.5; display: flex; align-items: center;"),
           div(style="min-width: 180px;",
               selectInput("chart_type", NULL, 
-                          choices = c("Likert Chart" = "likert", "Current vs Overall" = "comparison"), 
+                          choices = c("Current Task" = "likert", "Current vs Overall" = "comparison"), 
                           selected = "likert",
                           width = "100%")
           )
       )
     } else if(is_categorical_chartable(input$variable_select)) {
-      # Chart type selector for other categorical variables
-      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px;",
-          span("Select Chart Type:", style="white-space: nowrap; min-width: 110px;"),
-          div(style="min-width: 140px;",
-              selectInput("chart_type", NULL, 
-                          choices = c("Bar Chart" = "bar", "Pie Chart" = "pie"), 
-                          selected = "bar",
-                          width = "100%")
-          )
-      )
+      # No chart selector needed for categorical variables - only bar chart available
+      NULL
     } else if(is_average_variable(input$variable_select)) {
       # Chart type selector for average variables
-      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px;",
-          span("Select Chart Type:", style="white-space: nowrap; min-width: 110px;"),
+      div(style="display: flex; align-items: center; gap: 10px; font-size: 14px; justify-content: flex-end;",
+          span("Select Chart Type:", style="white-space: nowrap; line-height: 1.5; display: flex; align-items: center;"),
           div(style="min-width: 160px;",
               selectInput("chart_type", NULL, 
                           choices = c("Task Average" = "task", "All Data Average" = "all_data", "Both" = "both"), 
@@ -1049,16 +1343,16 @@ server <- function(input, output, session) {
           ) %>%
           ungroup()
         
-        # Create colors for responses (red to blue scale)
-        likert_colors <- c("Disagree" = "#d73027", "Somewhat disagree" = "#fc8d59",
-                           "Somewhat agree" = "#91bfdb", "Agree" = "#4575b4")
+        # Create colors for responses
+        likert_colors <- c("Disagree" = "#d8b365", "Somewhat disagree" = "#ebd9b2",
+                           "Somewhat agree" = "#acd9d5", "Agree" = "#5ab4ac")
         
         # Create the centered chart
         p <- ggplot(likert_data, aes(x = Demo_Label, fill = Variable)) +
           geom_col(aes(y = neg_percent), alpha = 0.9) +
           geom_col(aes(y = pos_percent), alpha = 0.9) +
           geom_text(aes(y = plot_value, label = ifelse(abs(Percentage) > 5, paste0(Percentage, "%"), "")), 
-                    size = 3.5, color = "white", fontface = "bold") +
+                    size = 4.5, color = "black", fontface = "bold") +
           scale_fill_manual(values = likert_colors) +
           coord_flip() +
           geom_hline(yintercept = 0, color = "black", size = 0.5) +
@@ -1066,13 +1360,13 @@ server <- function(input, output, session) {
             title = paste("Distribution of", input$variable_select, "Responses"),
             subtitle = paste("by", input$demographic_select, "(Centered percentages)"),
             x = input$demographic_select,
-            y = "Percentage (Negative ← → Positive)",
+            y = "Percentage",
             fill = "Response Level"
           ) +
           theme_minimal(base_size = 16) +
           theme(legend.position = "bottom", 
                 plot.title = element_text(face="bold"),
-                axis.text.y = element_text(size = 12)) +
+                axis.text.y = element_text(size = 14)) +
           guides(fill = guide_legend(nrow = 2)) +
           scale_y_continuous(labels = function(x) paste0(abs(x), "%"))
         
@@ -1091,28 +1385,39 @@ server <- function(input, output, session) {
           ungroup() %>%
           mutate(Source = "Current Task")
         
-        # Calculate overall distribution across all data (cached)
+        # Calculate overall distribution across all data (cached and optimized)
         if(!is.null(combined_data_cache)) {
           
           if(input$variable_select %in% names(combined_data_cache) && input$demographic_select %in% names(combined_data_cache)) {
-            overall_data <- combined_data_cache %>%
-              filter(!is.na(.data[[input$variable_select]]) & .data[[input$variable_select]] != "",
-                     !is.na(.data[[input$demographic_select]]) & .data[[input$demographic_select]] != "") %>%
-              group_by(dem_group = .data[[input$demographic_select]], var_value = .data[[input$variable_select]]) %>%
-              summarise(count = n(), .groups = 'drop') %>%
-              group_by(dem_group) %>%
-              mutate(total = sum(count),
-                     percentage = round((count / total) * 100, 1)) %>%
-              ungroup() %>%
-              mutate(
-                Demographic = map_demographic_value(input$demographic_select, dem_group),
-                Variable = map_variable_value(input$variable_select, var_value),
-                Count = count,
-                Percentage = percentage,
-                Total = total,
-                Source = "Overall"
-              ) %>%
-              select(Demographic, Variable, Count, Percentage, Total, Source)
+            # Pre-filter to reduce data size before grouping operations
+            filtered_cache <- combined_data_cache[
+              !is.na(combined_data_cache[[input$variable_select]]) & 
+                combined_data_cache[[input$variable_select]] != "" &
+                !is.na(combined_data_cache[[input$demographic_select]]) & 
+                combined_data_cache[[input$demographic_select]] != "",
+              c(input$variable_select, input$demographic_select)
+            ]
+            
+            if(nrow(filtered_cache) > 0) {
+              overall_data <- filtered_cache %>%
+                group_by(dem_group = .data[[input$demographic_select]], var_value = .data[[input$variable_select]]) %>%
+                summarise(count = n(), .groups = 'drop') %>%
+                group_by(dem_group) %>%
+                mutate(total = sum(count),
+                       percentage = round((count / total) * 100, 1)) %>%
+                ungroup() %>%
+                mutate(
+                  Demographic = map_demographic_value(input$demographic_select, dem_group),
+                  Variable = map_variable_value(input$variable_select, var_value),
+                  Count = count,
+                  Percentage = percentage,
+                  Total = total,
+                  Source = "Overall"
+                ) %>%
+                select(Demographic, Variable, Count, Percentage, Total, Source)
+            } else {
+              overall_data <- data.frame()
+            }
             
             # Combine both datasets
             comparison_data <- bind_rows(current_data, overall_data)
@@ -1126,8 +1431,8 @@ server <- function(input, output, session) {
               mutate(Demo_Source_Label = paste0(Demographic, " - ", Source, " (N=", Total, ")"))
             
             # Create colors for responses
-            likert_colors <- c("Disagree" = "#d73027", "Somewhat disagree" = "#fc8d59",
-                               "Somewhat agree" = "#91bfdb", "Agree" = "#4575b4")
+            likert_colors <- c("Disagree" = "#d8b365", "Somewhat disagree" = "#ebd9b2",
+                               "Somewhat agree" = "#acd9d5", "Agree" = "#5ab4ac")
             
             # Calculate positions for centered chart
             comparison_data <- comparison_data %>%
@@ -1153,7 +1458,7 @@ server <- function(input, output, session) {
               geom_col(aes(y = neg_percent), alpha = 0.9) +
               geom_col(aes(y = pos_percent), alpha = 0.9) +
               geom_text(aes(y = plot_value, label = ifelse(abs(Percentage) > 5, paste0(Percentage, "%"), "")), 
-                        size = 3.5, color = "white", fontface = "bold") +
+                        size = 4.5, color = "black", fontface = "bold") +
               scale_fill_manual(values = likert_colors) +
               coord_flip() +
               geom_hline(yintercept = 0, color = "black", size = 0.5) +
@@ -1161,13 +1466,13 @@ server <- function(input, output, session) {
                 title = paste("Comparison:", input$variable_select, "Responses"),
                 subtitle = paste("Current Task vs Overall Data by", input$demographic_select, "(Centered percentages)"),
                 x = paste(input$demographic_select, "Groups"),
-                y = "Percentage (Negative ← → Positive)", 
+                y = "Percentage", 
                 fill = "Response Level"
               ) +
               theme_minimal(base_size = 16) +
               theme(legend.position = "bottom", 
                     plot.title = element_text(face="bold"),
-                    axis.text.y = element_text(size = 10)) +
+                    axis.text.y = element_text(size = 14)) +
               guides(fill = guide_legend(nrow = 2)) +
               scale_y_continuous(labels = function(x) paste0(abs(x), "%"))
           } else {
@@ -1180,11 +1485,28 @@ server <- function(input, output, session) {
       
     } else if(is_categorical_chartable(variable)) {
       # Chart for other categorical data
-      req(input$chart_type)
       
-      if(input$chart_type == "bar") {
-        ggplot(data, aes(x = Demographic, y = Count, fill = Variable)) +
+      # Create N counts for each demographic group
+      demo_totals <- data %>%
+        group_by(Demographic) %>%
+        summarise(N = sum(Count, na.rm = TRUE), .groups = 'drop') %>%
+        mutate(Demo_Label = paste0(Demographic, " (N=", N, ")"))
+      
+      # Add N labels to the data
+      chart_data <- data %>%
+        left_join(demo_totals, by = "Demographic") %>%
+        mutate(Demographic_Label = Demo_Label)
+      
+      # Create colors for _SC variables (flip so green=correct, red=incorrect)
+      if(endsWith(variable, "_SC")) {
+        sc_colors <- c("Incorrect" = "#e74c3c", "Correct" = "#27ae60")  # Red for incorrect, green for correct
+        
+        ggplot(chart_data, aes(x = Demographic_Label, y = Count, fill = Variable)) +
           geom_col(position = "dodge") +
+          geom_text(aes(label = Count, y = Count + max(Count) * 0.02), 
+                    position = position_dodge(width = 0.9), 
+                    vjust = 0, size = 4, fontface = "bold") +
+          scale_fill_manual(values = sc_colors) +
           labs(
             title = paste("Distribution of", input$variable_select),
             subtitle = paste("by", input$demographic_select),
@@ -1193,16 +1515,27 @@ server <- function(input, output, session) {
             fill = "Response"
           ) +
           theme_minimal(base_size = 16) +
-          theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom", plot.title = element_text(face="bold"))
-      } else if (input$chart_type == "pie") {
-        pie_data <- data %>% group_by(Demographic) %>% summarise(Total = sum(Count, na.rm = TRUE), .groups = 'drop')
-        ggplot(pie_data, aes(x = "", y = Total, fill = Demographic)) +
-          geom_bar(stat = "identity", width = 1) +
-          coord_polar("y", start = 0) +
-          geom_text(aes(label = paste0(round(Total/sum(Total)*100), "%")), position = position_stack(vjust = 0.5), size=5) +
-          labs(title = paste("Proportion of Responses by", input$demographic_select), fill = input$demographic_select, x = NULL, y = NULL) +
-          theme_void(base_size = 16) +
-          theme(legend.title = element_text(face = "bold"), plot.title = element_text(face="bold"))
+          theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+                legend.position = "bottom", 
+                plot.title = element_text(face="bold"))
+      } else {
+        # Default colors for other categorical variables
+        ggplot(chart_data, aes(x = Demographic_Label, y = Count, fill = Variable)) +
+          geom_col(position = "dodge") +
+          geom_text(aes(label = Count, y = Count + max(Count) * 0.02), 
+                    position = position_dodge(width = 0.9), 
+                    vjust = 0, size = 4, fontface = "bold") +
+          labs(
+            title = paste("Distribution of", input$variable_select),
+            subtitle = paste("by", input$demographic_select),
+            x = input$demographic_select,
+            y = "Count",
+            fill = "Response"
+          ) +
+          theme_minimal(base_size = 16) +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+                legend.position = "bottom", 
+                plot.title = element_text(face="bold"))
       }
     } else {
       # Message for non-chartable data (like open-ended)
